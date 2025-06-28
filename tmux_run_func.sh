@@ -1,0 +1,234 @@
+# tmux_run: Execute shell commands in tmux panes and capture output
+# py_repl: Execute Python code in tmux panes running Python REPLs
+#
+# Usage:
+#   tmux_run <target> <shell_command>  # For shell commands
+#   py_repl <target> <python_code>     # For Python REPLs
+#
+# Example with SSH and Python:
+#   tmux new-session -d -s ssh_repl
+#   tmux send-keys -t ssh_repl "ssh lattitude" C-m
+#   tmux send-keys -t ssh_repl "python3" C-m
+#   py_repl ssh_repl "print('hello, world!')"  # Use py_repl for Python
+
+# TODO fix this case
+#tmux_run calc_session "print('\\nhi')"
+#Traceback (most recent call last):
+#  File "<stdin>", line 2, in <module>
+#  File "<string>", line 1
+#    print('
+#          ^
+#SyntaxError: unterminated string literal (detected at line 1)
+
+# there is testing of this code in ~/test_tmux_run.sh
+
+
+# Description: Like `tmux send-keys` but synchronous. Meaning it waits for the command to finish running while 
+# `tmux send-keys` is asynchronous. It can be much more convenient since it 
+# returns the output of the command and waits for the command to finish running.
+# But don't use it to start an interactive command (e.g. a repl or ssh session).
+# Usage: tmux_run <target> <command>
+tmux_run() {
+    local target=$1
+    shift
+
+    local tmp=$(mktemp)
+
+    # Get the current command running in the pane
+    local current_cmd=$(tmux display-message -p -t "$target" '#{pane_current_command}')
+    
+    local SENT="__TMUX_DONE_$$"
+    
+    # Detect what kind of environment we're in and send appropriate commands
+    case "$current_cmd" in
+        python*|ipython*)
+            # For Python REPL, wrap exec in try/except to handle errors
+            # Properly escape the Python code to preserve quotes and backslashes
+            local escaped_code=$(printf '%s' "$*" | sed "s/'''/'''\\\\'''/g")
+            
+            tmux send-keys -t "$target" "try:" C-m
+            tmux send-keys -t "$target" "    exec('''$escaped_code''')" C-m
+            tmux send-keys -t "$target" "except Exception as e:" C-m
+            tmux send-keys -t "$target" "    import traceback; traceback.print_exc()" C-m
+            tmux send-keys -t "$target" "finally:" C-m
+            tmux send-keys -t "$target" "    print('$SENT')" C-m
+            
+            # Start piping after sending the structure but before executing
+            tmux pipe-pane -o -t "$target" "cat >'$tmp'"
+            
+            tmux send-keys -t "$target" "" C-m  # Empty line to complete compound statement
+            ;;
+        node|nodejs)
+            # For Node.js REPL
+            tmux pipe-pane -o -t "$target" "cat >'$tmp'"
+            tmux send-keys -t "$target" "$*" C-m
+            tmux send-keys -t "$target" "console.log('$SENT')" C-m
+            ;;
+        *)
+            # Default: assume shell
+            tmux pipe-pane -o -t "$target" "cat >'$tmp'"
+            tmux send-keys -t "$target" "$*; st=\$?; echo $SENT \$st" C-m
+            ;;
+    esac
+
+    # Stream output while waiting for sentinel
+    local lines_printed=0
+    local sentinel_count=0
+    # For Python, we only expect 1 sentinel since we start piping after sending the code
+    local expected_sentinels=2
+    if [[ "$current_cmd" =~ ^(python|ipython) ]]; then
+        expected_sentinels=1
+        # Skip the first line (empty line from completing the compound statement)
+        lines_printed=1
+    fi
+    
+    while [[ $sentinel_count -lt $expected_sentinels ]]; do 
+        sentinel_count=$(grep -c "$SENT" "$tmp" 2>/dev/null || echo 0)
+        sentinel_count=$(echo "$sentinel_count" | tr '\n' ' ' | awk '{print $NF}')
+        
+        # Validate sentinel_count is numeric
+        if ! [[ "$sentinel_count" =~ ^[0-9]+$ ]]; then
+            echo "tmux_run error: Unexpected output in tmux session. The session may have had pending input. Try again." >&2
+            tmux pipe-pane -t "$target"
+            rm -f "$tmp"
+            return 1
+        fi
+        
+        # Print any new lines that have appeared
+        local current_lines=$(wc -l < "$tmp" | tr -d ' ')
+        if [[ $current_lines -gt $lines_printed ]]; then
+            tail -n +$((lines_printed + 1)) "$tmp" | head -n $((current_lines - lines_printed)) | grep -v "$SENT" || true
+            lines_printed=$current_lines
+        fi
+        sleep 0.05
+    done
+
+    # Stop piping
+    tmux pipe-pane -t "$target"
+
+    # Print any remaining lines (excluding sentinel line)
+    local total_lines=$(wc -l < "$tmp" | tr -d ' ')
+    if [[ $total_lines -gt $lines_printed ]]; then
+        tail -n +$((lines_printed + 1)) "$tmp" | grep -v "$SENT" || true
+    fi
+
+    # Handle exit status based on environment
+    local exit_status=0
+    if [[ ! "$current_cmd" =~ ^(python|ipython|node|nodejs) ]]; then
+        # For shell, extract exit status
+        exit_status=$(grep "$SENT" "$tmp" | sed "s/.*$SENT //" | grep -o '^[0-9]*' | head -1)
+    fi
+
+    rm -f "$tmp"
+    return "$exit_status"
+}
+
+# Description: Creates a tmux session with a Python REPL. This is helpful 
+# since tmux_run doesn't work launching an interactive commands and python repl is an interactive command.
+# If the tmux session with the given name already exists, it will use it. Otherwise, it will create a new session.
+# Usage: start_tmux_repl <session_name> [python_command]
+start_tmux_repl() {
+    local session_name=$1
+    local python_cmd=${2:-python3}  # Default to python3 if not specified
+    
+    if [ -z "$session_name" ]; then
+        echo "Error: Session name required" >&2
+        echo "Usage: tmux_python_session <session_name> [python_command]" >&2
+        return 1
+    fi
+    
+    # Check if session already exists
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        echo "Error: Session '$session_name' already exists" >&2
+        return 1
+    fi
+    
+    # Create new session and start Python
+    tmux new-session -d -s "$session_name"
+    tmux send-keys -t "$session_name" "$python_cmd" C-m
+    
+    # Wait for Python REPL to be ready
+    local max_attempts=20  # 2 seconds max wait
+    local attempt=0
+    
+    while [ $attempt -lt $max_attempts ]; do
+        # Check if Python prompt is ready by looking for '>>>'
+        local pane_content=$(tmux capture-pane -t "$session_name" -p 2>/dev/null | tail -5)
+        
+        if echo "$pane_content" | grep -q '>>>'; then
+            echo "Python session '$session_name' is ready"
+            return 0
+        fi
+        
+        sleep 0.05
+        ((attempt++))
+    done
+    
+    return 0  # Still return success since session was created
+}
+
+# Description: Like tmux_run but for when there is a python repl running within the tmux session
+# Usage: py_run <target> <python_code>
+py_run() {
+    local target=$1
+    shift
+    
+    local tmp=$(mktemp)
+    local SENT="__PY_DONE_$$"
+    echo "python code: $*"
+    
+    # Properly escape the Python code to preserve quotes and backslashes
+    local escaped_code=$(printf '%s' "$*" | sed "s/'''/'''\\\\'''/g")
+    
+    # For Python REPL, wrap exec in try/except to handle errors
+    tmux send-keys -t "$target" "try:" C-m
+    tmux send-keys -t "$target" "    exec('''$escaped_code''')" C-m
+    tmux send-keys -t "$target" "except Exception as e:" C-m
+    tmux send-keys -t "$target" "    import traceback; traceback.print_exc()" C-m
+    tmux send-keys -t "$target" "finally:" C-m
+    tmux send-keys -t "$target" "    print('$SENT')" C-m
+    
+    # Start piping after sending the structure but before executing
+    tmux pipe-pane -o -t "$target" "cat >'$tmp'"
+    
+    # Empty line to complete compound statement and execute
+    tmux send-keys -t "$target" "" C-m
+    
+    # Stream output while waiting for sentinel
+    local lines_printed=1  # Skip first line (empty from compound statement)
+    local sentinel_count=0
+    
+    while [[ $sentinel_count -lt 1 ]]; do 
+        sentinel_count=$(grep -c "$SENT" "$tmp" 2>/dev/null || echo 0)
+        sentinel_count=$(echo "$sentinel_count" | tr '\n' ' ' | awk '{print $NF}')
+        
+        # Validate sentinel_count is numeric
+        if ! [[ "$sentinel_count" =~ ^[0-9]+$ ]]; then
+            echo "py_repl error: Unexpected output. The REPL may have had pending input. Try again." >&2
+            tmux pipe-pane -t "$target"
+            rm -f "$tmp"
+            return 1
+        fi
+        
+        # Print any new lines that have appeared
+        local current_lines=$(wc -l < "$tmp" | tr -d ' ')
+        if [[ $current_lines -gt $lines_printed ]]; then
+            tail -n +$((lines_printed + 1)) "$tmp" | head -n $((current_lines - lines_printed)) | grep -v "$SENT" || true
+            lines_printed=$current_lines
+        fi
+        sleep 0.05
+    done
+    
+    # Stop piping
+    tmux pipe-pane -t "$target"
+    
+    # Print any remaining lines (excluding sentinel line)
+    local total_lines=$(wc -l < "$tmp" | tr -d ' ')
+    if [[ $total_lines -gt $lines_printed ]]; then
+        tail -n +$((lines_printed + 1)) "$tmp" | grep -v "$SENT" || true
+    fi
+    
+    rm -f "$tmp"
+    echo "finished running python code on repl"
+    return 0
+}
