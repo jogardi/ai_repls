@@ -43,11 +43,8 @@ tmux_run() {
     case "$current_cmd" in
         python*|ipython*)
             # For Python REPL, wrap exec in try/except to handle errors
-            # Properly escape the Python code to preserve quotes and backslashes
-            local escaped_code=$(printf '%s' "$*" | sed "s/'''/'''\\\\'''/g")
-            
             tmux send-keys -t "$target" "try:" C-m
-            tmux send-keys -t "$target" "    exec('''$escaped_code''')" C-m
+            tmux send-keys -t "$target" "    exec('''$*''')" C-m
             tmux send-keys -t "$target" "except Exception as e:" C-m
             tmux send-keys -t "$target" "    import traceback; traceback.print_exc()" C-m
             tmux send-keys -t "$target" "finally:" C-m
@@ -125,7 +122,7 @@ tmux_run() {
 
 # Description: Creates a tmux session with a Python REPL. This is helpful 
 # since tmux_run doesn't work launching an interactive commands and python repl is an interactive command.
-# If the tmux session with the given name already exists, it will use it. Otherwise, it will create a new session.
+# If the tmux session with the given name already exists, it will start a python repl in that session. Otherwise, it will create a new session.
 # Usage: start_tmux_repl <session_name> [python_command]
 start_tmux_repl() {
     local session_name=$1
@@ -139,13 +136,22 @@ start_tmux_repl() {
     
     # Check if session already exists
     if tmux has-session -t "$session_name" 2>/dev/null; then
-        echo "Error: Session '$session_name' already exists" >&2
-        return 1
+        echo "Using existing session '$session_name'"
+        # Check if Python is already running in the session
+        local current_cmd=$(tmux display-message -p -t "$session_name" '#{pane_current_command}')
+        if [[ "$current_cmd" =~ ^(python|ipython) ]]; then
+            echo "Python REPL already running in session '$session_name'"
+            return 0
+        else
+            # Start Python in the existing session
+            tmux send-keys -t "$session_name" "$python_cmd" C-m
+        fi
+    else
+        # Create new session and start Python
+        tmux new-session -d -s "$session_name"
+        tmux send-keys -t "$session_name" "$python_cmd" C-m
+        echo "Created new session '$session_name'"
     fi
-    
-    # Create new session and start Python
-    tmux new-session -d -s "$session_name"
-    tmux send-keys -t "$session_name" "$python_cmd" C-m
     
     # Wait for Python REPL to be ready
     local max_attempts=20  # 2 seconds max wait
@@ -166,6 +172,7 @@ start_tmux_repl() {
     
     return 0  # Still return success since session was created
 }
+TMUX_RUN_DEBUG=0
 
 # Description: Like tmux_run but for when there is a python repl running within the tmux session
 # Usage: py_run <target> <python_code>
@@ -175,14 +182,28 @@ py_run() {
     
     local tmp=$(mktemp)
     local SENT="__PY_DONE_$$"
-    echo "python code: $*"
     
-    # Properly escape the Python code to preserve quotes and backslashes
-    local escaped_code=$(printf '%s' "$*" | sed "s/'''/'''\\\\'''/g")
+    # Debug output only if TMUX_RUN_DEBUG is set
+    if [ "$TMUX_RUN_DEBUG" = "1" ]; then
+        echo "python code: $*" >&2
+    fi
     
-    # For Python REPL, wrap exec in try/except to handle errors
+    # Base64 encode the Python code to avoid any escaping issues
+    local encoded_code=$(printf '%s' "$*" | base64)
+    
+    # # Clear the scrollback buffer to ensure clean output
+    # tmux send-keys -t "$target" C-l
+    
+    # # Send a marker before our actual command to help identify where output starts
+    # local START_MARKER="__PY_START_$$"
+    # tmux send-keys -t "$target" "print('$START_MARKER')" C-m
+    # sleep 0.1  # Give time for the marker to be printed
+    
+    # For Python REPL, decode and execute the base64 encoded code
+    tmux send-keys -t "$target" "import base64" C-m
     tmux send-keys -t "$target" "try:" C-m
-    tmux send-keys -t "$target" "    exec('''$escaped_code''')" C-m
+    tmux send-keys -t "$target" "    code = base64.b64decode('$encoded_code').decode('utf-8')" C-m
+    tmux send-keys -t "$target" "    exec(code)" C-m
     tmux send-keys -t "$target" "except Exception as e:" C-m
     tmux send-keys -t "$target" "    import traceback; traceback.print_exc()" C-m
     tmux send-keys -t "$target" "finally:" C-m
@@ -195,8 +216,9 @@ py_run() {
     tmux send-keys -t "$target" "" C-m
     
     # Stream output while waiting for sentinel
-    local lines_printed=1  # Skip first line (empty from compound statement)
+    local lines_printed=1
     local sentinel_count=0
+    local found_start=0
     
     while [[ $sentinel_count -lt 1 ]]; do 
         sentinel_count=$(grep -c "$SENT" "$tmp" 2>/dev/null || echo 0)
@@ -229,6 +251,11 @@ py_run() {
     fi
     
     rm -f "$tmp"
-    echo "finished running python code on repl"
+    
+    # Debug output only if TMUX_RUN_DEBUG is set
+    if [ "$TMUX_RUN_DEBUG" = "1" ]; then
+        echo "finished running python code on repl" >&2
+    fi
+    
     return 0
 }

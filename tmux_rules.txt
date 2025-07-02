@@ -1,0 +1,79 @@
+Tmux is a powerful tool for you because it helps you manage long running processes and interactive commands.
+For you, one of the most powerful uses of tmux is using a python repl.
+Here are some useful functions available to you.
+
+# tmux_run
+Like `tmux send-keys` but synchronous. It can be much more convenient since it
+returns the output of the command and waits for the command to finish running.
+But don't use it to start a long running command (e.g. a repl or ssh session).
+Usage: tmux_run <target> <command>
+
+# start_tmux_repl
+Creates a tmux session with a Python REPL. This is helpful 
+since tmux_run doesn't work launching an interactive commands and python repl is an interactive command.
+If the tmux session with the given name already exists, it will use it. Otherwise, it will create a new session.
+Usage: start_tmux_repl <session_name> [python_command]
+
+# py_run
+Like tmux_run but for when there is a python repl running within the tmux session
+Usage: py_run <target> <python_code>
+
+Examples of what you can do: ```
+# to start a repl
+start_tmux_repl my_repl
+# to run python code on the repl you just started
+py_run my_repl "print('hi')"
+# run multiple lines of python code on the repl you just started
+py_run my_repl "print('hi')
+print('bye')"
+# start a repl and run some code in a single step. 
+start_tmux_repl my_repl && py_repl my_repl "print('hi')"
+# start a repl with the poetry environment of the current directory
+start_tmux_repl my_repl "poetry run python3"
+
+You can also use ssh within a tmux session:
+```
+tmux new-session -d -s ssh_repl
+tmux_run ssh_repl "cd <path to my experiment code>"
+tmux_run ssh_repl "./run_my_big_experiment.sh"
+```
+Then you could even start a python repl within ssh on myserver.
+```
+tmux new-session -d -s ssh_repl
+# using send-keys since tmux_run doesn't work with interactive command. In this case
+tmux send-keys -t ssh_repl "python3" C-m
+py_run ssh_repl "print('hello')
+```
+
+When you are using tmux, it is convenient for you to use the tmux_run bash function in order to run commands and get the result. For example, you can do `tmux_run my_session "echo 'hello world'`. This function is already available for you. You do not need to define it. Warning: don't run interactive commands with tmux_run because it would hang. For you, one of the most powerful uses of tmux is using a python repl.
+When you want to use a python repl you can do so by creating a tmux session and starting a python repl within that session. Since, tmux_run doesn't work with interactive commands you should use the start_tmux_repl function to start a repl within a tmux session. 
+The py_run function is like tmux_run but for when a python repl is running within the tmux session.
+Examples of what you can do: ```
+# to start a repl
+start_tmux_repl my_repl
+# to run python code on the repl you just started
+py_run my_repl "print('hi')"
+# run multiple lines of python code on the repl you just started
+py_run my_repl "print('hi')
+print('bye')"
+# start a repl and run some code in a single step. start_tmux_repl creates a tmux session for you automatically if the session doesn't already exist
+start_tmux_repl my_repl && py_repl my_repl "print('hi')"
+# start a repl with the poetry environment of the current directory
+start_tmux_repl my_repl "poetry run python3"
+
+You can also use ssh within a tmux session:
+```
+tmux new-session -d -s ssh_repl
+# using send-keys rather than tmux_run since ssh is interactive
+tmux send-keys -t ssh_repl "ssh myserver" C-m
+tmux_run ssh_repl "cd <path to my experiment code>"
+tmux_run ssh_repl "./run_my_big_experiment.sh"
+```
+You could even start a python repl wihtin ssh on myserver.
+```
+tmux new-session -d -s ssh_repl
+tmux send-keys -t ssh_repl "ssh myserver" C-m
+# using send-keys since tmux_run doesn't work with interactive command
+start_tmux_repl ssh_repl python3
+py_run ssh_repl "print('hello')"
+```
