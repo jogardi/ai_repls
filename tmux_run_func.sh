@@ -28,6 +28,8 @@
 # returns the output of the command and waits for the command to finish running.
 # But don't use it to start an interactive command (e.g. a repl or ssh session).
 # Usage: tmux_run <target> <command>
+source ~/tmux_funcs/advice.sh
+
 tmux_run() {
     local target=$1
     shift
@@ -188,8 +190,12 @@ py_run() {
         echo "python code: $*" >&2
     fi
     
-    # Base64 encode the Python code to avoid any escaping issues
-    local encoded_code=$(printf '%s' "$*" | base64)
+    # Base64 encode the Python code to avoid any escaping issues. Ensure the
+    # encoded string does not contain newlines because GNU coreutils' `base64`
+    # inserts line-wraps by default which breaks the single-line string we send
+    # to the Python REPL. Strip any newlines to make the output consistent
+    # across platforms (macOS, Linux, etc.).
+    local encoded_code=$(printf '%s' "$*" | base64 | tr -d '\n')
     
     # # Clear the scrollback buffer to ensure clean output
     # tmux send-keys -t "$target" C-l
@@ -202,7 +208,8 @@ py_run() {
     # For Python REPL, decode and execute the base64 encoded code
     tmux send-keys -t "$target" "import base64" C-m
     tmux send-keys -t "$target" "try:" C-m
-    tmux send-keys -t "$target" "    code = base64.b64decode('$encoded_code').decode('utf-8')" C-m
+    tmux send-keys -t "$target" "    encoded_code = '$encoded_code'" C-m
+    tmux send-keys -t "$target" "    code = base64.b64decode(encoded_code).decode('utf-8')" C-m
     tmux send-keys -t "$target" "    exec(code)" C-m
     tmux send-keys -t "$target" "except Exception as e:" C-m
     tmux send-keys -t "$target" "    import traceback; traceback.print_exc()" C-m

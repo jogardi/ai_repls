@@ -1,4 +1,5 @@
 #!/bin/bash
+source ./tmux_run_func.sh
 
 # Test suite for py_run Python functionality
 # Compare behavior of python3 -c with py_run
@@ -13,7 +14,6 @@ NC='\033[0m' # No Color
 TMUX_RUN_TIMEOUT=5
 
 # Source the functions
-source ~/tmux_run_func.sh
 
 # Create a test tmux session
 tmux kill-session -t test_tmux_py 2>/dev/null
