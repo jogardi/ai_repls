@@ -28,7 +28,17 @@
 # returns the output of the command and waits for the command to finish running.
 # But don't use it to start an interactive command (e.g. a repl or ssh session).
 # Usage: tmux_run <target> <command>
-source ./advice.sh
+if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+    # bash
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+elif [[ -n "${(%):-%x}" ]]; then
+    # zsh
+    SCRIPT_DIR="$(cd "$(dirname "${(%):-%x}")" && pwd)"
+else
+    # fallback - assume script is in the expected location
+    SCRIPT_DIR="$HOME/Documents/workspace/ai_repls"
+fi
+source "$SCRIPT_DIR/advice.sh"
 
 tmux_run() {
     local target=$1

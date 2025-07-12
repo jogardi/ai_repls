@@ -13,7 +13,7 @@ Usage: tmux_run <target> <command>
 Creates a tmux session with a Python REPL. This is helpful 
 since tmux_run doesn't work launching an interactive commands and python repl is an interactive command.
 If the tmux session with the given name already exists, it will use it. Otherwise, it will create a new session.
-Usage: start_tmux_repl <session_name> [python_command]
+Usage: start_tmux_repl <target> [python_command]
 
 # py_run
 Like tmux_run but for when there is a python repl running within the tmux session
