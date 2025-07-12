@@ -1,4 +1,4 @@
-uUse the ask_advice command anytime you have a difficult problem. 
+Use the ask_advice command anytime you have a difficult problem. 
 You should proactively decide on your own when to use ask_advice without being asked to.
 Sometimes you use ask_advice even if you already have a solution because
 it might come up with a simpler solution.

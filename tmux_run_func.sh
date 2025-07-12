@@ -20,7 +20,7 @@
 #          ^
 #SyntaxError: unterminated string literal (detected at line 1)
 
-# there is testing of this code in ~/test_tmux_run.sh
+# there is testing of this code in test_tmux_run.sh
 
 
 # Description: Like `tmux send-keys` but synchronous. Meaning it waits for the command to finish running while 
@@ -28,7 +28,7 @@
 # returns the output of the command and waits for the command to finish running.
 # But don't use it to start an interactive command (e.g. a repl or ssh session).
 # Usage: tmux_run <target> <command>
-source ~/tmux_funcs/advice.sh
+source ./advice.sh
 
 tmux_run() {
     local target=$1

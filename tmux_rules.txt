@@ -6,6 +6,7 @@ Here are some useful functions available to you.
 Like `tmux send-keys` but synchronous. It can be much more convenient since it
 returns the output of the command and waits for the command to finish running.
 But don't use it to start a long running command or an interactive session such as a repl or ssh session.
+`tmux send-keys` is still better for that since it is asynchronous.
 Usage: tmux_run <target> <command>
 
 # start_tmux_repl
