@@ -36,40 +36,32 @@ ask_advice() {
         return 1
     fi
     
-    # Create temporary files for outputs
-    local gemini_output=$(mktemp)
+    # Create a temp file for o3 output
     local o3_output=$(mktemp)
     
-    # Start both calls in parallel
+    # Start o3 in the background using nohup to prevent tty issues
     if [ -n "$full_context" ]; then
-        # Run Gemini in background
-        (echo "$full_context" | gemini_reason_search "$full_query" > "$gemini_output" 2>&1) &
-        local gemini_pid=$!
-        
-        # Run O3 in background
-        (echo "$full_context" | llm -m o3 "$full_query" > "$o3_output" 2>&1) &
-        local o3_pid=$!
+        nohup bash -c "echo \"$full_context\" | llm -m o3 \"$full_query\" > \"$o3_output\" 2>&1" &
     else
-        # Run Gemini in background
-        (gemini_reason_search "$full_query" > "$gemini_output" 2>&1) &
-        local gemini_pid=$!
-        
-        # Run O3 in background
-        (llm -m o3 "$full_query" > "$o3_output" 2>&1) &
-        local o3_pid=$!
+        nohup bash -c "llm -m o3 \"$full_query\" > \"$o3_output\" 2>&1" &
+    fi
+    local o3_pid=$!
+    
+    # Run Gemini (foreground)
+    echo "=== GEMINI RESPONSE ==="
+    if [ -n "$full_context" ]; then
+        echo "$full_context" | gemini_reason_search "$full_query"
+    else
+        gemini_reason_search "$full_query"
     fi
     
-    # Wait for Gemini to complete and display its response first
-    wait $gemini_pid
-    echo "=== GEMINI RESPONSE ==="
-    cat "$gemini_output"
-    
-    # Wait for O3 to complete and display its response
-    wait $o3_pid
+    # Wait for o3 to complete and show its output
     echo ""
     echo "=== O3 RESPONSE ==="
+    wait $o3_pid
     cat "$o3_output"
     
-    # Clean up temporary files
-    rm -f "$gemini_output" "$o3_output"
+    # Clean up temp file and nohup.out
+    rm -f "$o3_output"
+    rm -f nohup.out
 }

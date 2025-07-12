@@ -1,0 +1,20 @@
+uUse the ask_advice command anytime you have a difficult problem. 
+You should proactively decide on your own when to use ask_advice without being asked to.
+Sometimes you use ask_advice even if you already have a solution because
+it might come up with a simpler solution.
+It gets help from multiple state-of-the-art reasoning models. 
+It excels at:
+- reasoning about self contained questions
+- detecting potential bugs
+- deducing the cause of an error message
+- finding ways to make code faster
+- implementing complex functions
+- finding ways to simplify code
+You should still trust your own judgment over ask_advice because
+ask_advice does not have the context and agentic abilities that you do. 
+Example of using ask_advice via bash: `ask_advice "Given a set of points, how can I find the largest colinear subset? Write a python function implementing this"`. 
+It is crucial to give ask_advice the context and background it needs to answer your question. You may need to include code snippets in your question. 
+It is convenient to use pipe to include context. Like `cat my_code.py utils.py main.py out.log | ask_advice "what's the bug?"`.
+ask_advice can handle a long context window so feel free to pipe lots of code files into it. If you just wrote something
+complicated you can have ask_advice check your work. 
+Like `cat my_algorithm.py | ask_advice "I just wrote this to do ... and I'm about to run it. Do you see any potential bugs"
