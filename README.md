@@ -1,6 +1,7 @@
 # AI REPLs
 
 This project provides a set of bash functions I use to enhance the capabilities of AI agents, like the Cursor agent. 
+Inspired by https://github.com/nickgnd/tmux-mcp.
 
 I think the best feature is the py_run function which makes the cursor chat feel like an psuedocode repl.
 Just type psudecode in the chat. I didn't use mcp because I wanted to stream the output from the repl.
