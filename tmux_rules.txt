@@ -32,6 +32,9 @@ start_tmux_repl my_repl && py_repl my_repl "print('hi')"
 # start a repl with the poetry environment of the current directory
 start_tmux_repl my_repl "poetry run python3"
 
+# julia_run
+Like py_run but for the julia repl
+
 You can also use ssh within a tmux session:
 ```
 tmux new-session -d -s ssh_repl

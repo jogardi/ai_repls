@@ -1,9 +1,11 @@
 # tmux_run: Execute shell commands in tmux panes and capture output
-# py_repl: Execute Python code in tmux panes running Python REPLs
+# py_run: Execute Python code in tmux panes running Python REPLs
+# julia_run: Execute Julia code in tmux panes running Julia REPLs
 #
 # Usage:
-#   tmux_run <target> <shell_command>  # For shell commands
-#   py_repl <target> <python_code>     # For Python REPLs
+#   tmux_run <target> <shell_command>   # For shell commands
+#   py_run <target> <python_code>       # For Python REPLs
+#   julia_run <target> <julia_code>     # For Julia REPLs
 #
 # Example with SSH and Python:
 #   tmux new-session -d -s ssh_repl
@@ -196,7 +198,7 @@ py_run() {
     local SENT="__PY_DONE_$$"
     
     # Debug output only if TMUX_RUN_DEBUG is set
-    if [ "$TMUX_RUN_DEBUG" = "1" ]; then
+    if [ "${TMUX_RUN_DEBUG:-0}" = "1" ]; then
         echo "python code: $*" >&2
     fi
     
@@ -270,9 +272,104 @@ py_run() {
     rm -f "$tmp"
     
     # Debug output only if TMUX_RUN_DEBUG is set
-    if [ "$TMUX_RUN_DEBUG" = "1" ]; then
+    if [ "${TMUX_RUN_DEBUG:-0}" = "1" ]; then
         echo "finished running python code on repl" >&2
     fi
     
     return 0
+}
+
+# Description: Like tmux_run but for when there is a julia repl running within the tmux session
+# Usage: julia_run <target> <julia_code>
+julia_run() {
+    local target=$1
+    shift
+    
+    local tmp=$(mktemp)
+    local completion_file=$(mktemp)
+    
+    # Debug output only if TMUX_RUN_DEBUG is set
+    if [ "$TMUX_RUN_DEBUG" = "1" ]; then
+        echo "julia code: $*" >&2
+        echo "completion file: $completion_file" >&2
+    fi
+    
+    # Base64 encode the Julia code to avoid any escaping issues. Ensure the
+    # encoded string does not contain newlines because GNU coreutils' `base64`
+    # inserts line-wraps by default which breaks the single-line string we send
+    # to the Julia REPL. Strip any newlines to make the output consistent
+    # across platforms (macOS, Linux, etc.).
+    local encoded_code=$(printf '%s' "$*" | base64 | tr -d '\n')
+    
+    # For Julia REPL, decode and execute the base64 encoded code, then write completion marker to file
+    tmux send-keys -t "$target" "try" C-m
+    tmux send-keys -t "$target" "    import Base64" C-m
+    tmux send-keys -t "$target" "    encoded_code = \"$encoded_code\"" C-m
+    tmux send-keys -t "$target" "    code = String(Base64.base64decode(encoded_code))" C-m
+    tmux send-keys -t "$target" "    eval(Meta.parse(code))" C-m
+    tmux send-keys -t "$target" "catch e" C-m
+    tmux send-keys -t "$target" "    println(\"Error: \", e)" C-m
+    tmux send-keys -t "$target" "    showerror(stdout, e, catch_backtrace())" C-m
+    tmux send-keys -t "$target" "finally" C-m
+    tmux send-keys -t "$target" "    open(\"$completion_file\", \"w\") do f; write(f, \"DONE\"); end end"
+    # tmux send-keys -t "$target" "end" C-m
+    
+    # Start piping after sending the structure but before executing
+    tmux pipe-pane -o -t "$target" "cat >'$tmp'"
+    
+    # # Execute the try block
+    tmux send-keys -t "$target" "" C-m
+    
+    # Stream output while waiting for completion file
+    local lines_printed=10
+    
+    while [[ ! -f "$completion_file" || ! -s "$completion_file" ]]; do 
+        # Print any new lines that have appeared
+        local current_lines=$(wc -l < "$tmp" 2>/dev/null | tr -d ' ')
+        if [[ $current_lines -gt $lines_printed ]]; then
+            tail -n +$((lines_printed + 1)) "$tmp" | head -n $((current_lines - lines_printed)) 2>/dev/null || true
+            lines_printed=$current_lines
+        fi
+        sleep 0.05
+    done
+    
+    # Stop piping
+    tmux pipe-pane -t "$target"
+    
+    # Print any remaining lines
+    local total_lines=$(wc -l < "$tmp" 2>/dev/null | tr -d ' ')
+    if [[ $total_lines -gt $lines_printed ]]; then
+        tail -n +$((lines_printed + 1)) "$tmp" 2>/dev/null || true
+    fi
+    
+    # Clean up
+    rm -f "$tmp" "$completion_file"
+    
+    # Debug output only if TMUX_RUN_DEBUG is set
+    if [ "$TMUX_RUN_DEBUG" = "1" ]; then
+        echo "finished running julia code on repl" >&2
+    fi
+    
+    return 0
+}
+
+search_symbol() {
+   if [ $# -lt 2 ]; then
+        echo "Usage: search_symbol <symbol> <file_or_directory> [additional_grep_options]"
+        echo "Example: search_symbol my_variable src/"
+        echo "Example: search_symbol user_name *.py -n"
+        return 1
+    fi
+
+    local symbol="$1"
+    shift  # Remove first argument, rest are files/options
+
+    # Convert symbol to regex pattern
+    # Replace underscores with _? (optional underscore)
+    # Add word boundaries and case-insensitive flag
+    local pattern=$(echo "$symbol" | sed 's/_/_?/g')
+    pattern="\\b${pattern}\\b"
+
+    # Use grep with extended regex and case-insensitive
+    grep -iE "$pattern" "$@"
 }
