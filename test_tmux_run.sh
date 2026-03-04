@@ -263,6 +263,16 @@ invalid syntax here
 print('After error')" \
 "true"
 
+# Test 22: Regression guard for SSH REPL execution
+((total_tests++))
+echo -e "\n${BLUE}Test: No local wrapper file dependency${NC}"
+if declare -f py_run | grep -q "open('\\$wrapper_file')"; then
+    echo -e "${RED}✗ FAIL${NC} - py_run still references a local wrapper path"
+    ((failed_tests++))
+else
+    echo -e "${GREEN}✓ PASS${NC} - py_run executes in-band without local file open()"
+fi
+
 # Clean up
 tmux kill-session -t test_tmux_py 2>/dev/null
 

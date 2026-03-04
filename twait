@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF' >&2
+Usage: twait <tmux-target> [poll_seconds]
+
+Wait for the active pane in <tmux-target> to return to an interactive shell.
+Examples:
+  twait html_train
+  twait html_train:0 0.2
+EOF
+}
+
+if [[ "${1-}" == "-h" || "${1-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  usage
+  exit 2
+fi
+
+if ! command -v tmux >/dev/null 2>&1; then
+  echo "tmux is required but was not found in PATH." >&2
+  exit 127
+fi
+
+target="$1"
+poll_seconds="${2:-1}"
+
+if ! [[ "$poll_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "poll_seconds must be a non-negative number, got: $poll_seconds" >&2
+  exit 2
+fi
+
+find_active_pane() {
+  local target_name="$1"
+  local pane_rows pane
+
+  if ! pane_rows="$(tmux list-panes -t "$target_name" -F '#{pane_id} #{pane_active}' 2>/dev/null)"; then
+    return 1
+  fi
+
+  pane="$(awk '$2 == "1" { print $1; exit }' <<<"$pane_rows")"
+  if [[ -z "$pane" ]]; then
+    pane="$(awk 'NR == 1 { print $1; exit }' <<<"$pane_rows")"
+  fi
+
+  [[ -n "$pane" ]] || return 1
+  printf '%s\n' "$pane"
+}
+
+get_pane_state() {
+  local pane="$1"
+  local state
+
+  if ! state="$(tmux list-panes -t "$pane" -F '#{pane_dead} #{pane_current_command} #{pane_dead_status}' 2>/dev/null | head -n1)"; then
+    return 1
+  fi
+
+  [[ -n "$state" ]] || return 1
+  printf '%s\n' "$state"
+}
+
+if ! pane_id="$(find_active_pane "$target")"; then
+  echo "tmux target not found or has no panes: $target" >&2
+  exit 1
+fi
+
+default_shell="$(tmux show-options -gqv default-shell 2>/dev/null || true)"
+env_shell="${SHELL:-}"
+
+default_shell_name="$(basename "${default_shell%% *}")"
+env_shell_name="$(basename "${env_shell%% *}")"
+
+is_shell_command() {
+  local cmd="$1"
+
+  case "$cmd" in
+    "$default_shell_name"|"$env_shell_name"|bash|zsh|sh|dash|ksh|fish|tcsh|csh|nu)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+if ! initial_state="$(get_pane_state "$pane_id")"; then
+  echo "Pane $pane_id no longer exists." >&2
+  exit 1
+fi
+read -r initial_dead initial_command _ <<<"$initial_state"
+
+if [[ "$initial_dead" == "1" ]]; then
+  echo "Pane $pane_id is already dead; no running command to wait for." >&2
+  exit 0
+fi
+
+if is_shell_command "$initial_command"; then
+  echo "No foreground command is running in pane $pane_id." >&2
+  exit 0
+fi
+
+while true; do
+  if ! current_state="$(get_pane_state "$pane_id")"; then
+    echo "Pane $pane_id no longer exists while waiting for '$initial_command'." >&2
+    exit 1
+  fi
+  read -r pane_dead current_command pane_dead_status <<<"$current_state"
+
+  if [[ "$pane_dead" == "1" ]]; then
+    echo "Command '$initial_command' finished in pane $pane_id (dead pane, status ${pane_dead_status:-unknown})."
+    break
+  fi
+
+  if is_shell_command "$current_command"; then
+    echo "Command '$initial_command' finished in pane $pane_id."
+    break
+  fi
+
+  sleep "$poll_seconds"
+done
