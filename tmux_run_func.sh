@@ -513,6 +513,13 @@ twait() {
 
         recent_nonempty="$(tail -n 25 <<<"$nonempty_lines")"
 
+        # Active Codex turns render an interrupt hint in the recent footer area.
+        # Treat those panes as busy even though they also show the composer prompt
+        # and model status footer that idle panes have.
+        if grep -Eq 'esc to interrupt' <<<"$recent_nonempty"; then
+            return 1
+        fi
+
         # Idle Codex panes typically show a composer prompt line ("› ...")
         # and end with the model/rate status line ("... · NN% left · ...").
         if ! grep -Eq '^[[:space:]]*›[[:space:]].+' <<<"$recent_nonempty"; then
@@ -708,4 +715,341 @@ twait() {
     done
 
     _twait_cleanup_codex_waiter
+}
+
+_codex_exec_fork_find_new_session_id() {
+    if [[ $# -ne 3 ]]; then
+        echo "Usage: _codex_exec_fork_find_new_session_id <sessions_dir> <original_session_id> <marker_file>" >&2
+        return 2
+    fi
+
+    local sessions_dir="$1"
+    local original_session_id="$2"
+    local marker_file="$3"
+
+    python3 - "$sessions_dir" "$original_session_id" "$marker_file" <<'PY'
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+
+try:
+    sessions_dir = Path(sys.argv[1]).expanduser()
+    original_session_id = sys.argv[2]
+    marker_file = Path(sys.argv[3])
+
+    marker_ns = marker_file.stat().st_mtime_ns
+    candidates = []
+    for path in sessions_dir.rglob("rollout-*.jsonl"):
+        try:
+            with path.open() as handle:
+                first_line = handle.readline()
+            if first_line == "":
+                continue
+            record = json.loads(first_line)
+        except (OSError, json.JSONDecodeError):
+            # A rollout file can appear before the first JSONL line is fully flushed.
+            continue
+
+        if record["type"] != "session_meta":
+            continue
+
+        payload = record["payload"]
+        record_ns = int(datetime.fromisoformat(payload["timestamp"].replace("Z", "+00:00")).timestamp() * 1_000_000_000)
+        if record_ns <= marker_ns:
+            continue
+
+        candidates.append((record_ns, payload["id"], payload))
+
+    candidates.sort(key=lambda item: item[0])
+
+    for _, _, payload in candidates:
+        if payload.get("forked_from_id") != original_session_id:
+            continue
+
+        print(payload["id"])
+        raise SystemExit(0)
+
+    raise SystemExit(1)
+except SystemExit:
+    raise
+except Exception as exc:
+    print(f"_codex_exec_fork_find_new_session_id failed: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+}
+
+_codex_exec_fork_launch_in_pty() {
+    if [[ $# -ne 1 ]]; then
+        echo "Usage: _codex_exec_fork_launch_in_pty <original_session_id>" >&2
+        return 2
+    fi
+
+    local original_session_id="$1"
+    if ! command -v tmux >/dev/null 2>&1; then
+        echo "\`tmux\` is required to launch codex fork in a PTY." >&2
+        return 1
+    fi
+
+    local session_name="codex_exec_fork_${RANDOM:-0}_${RANDOM:-0}_$$"
+    if ! tmux new-session -d -s "$session_name"; then
+        echo "Failed to create tmux session $session_name for codex fork." >&2
+        return 1
+    fi
+
+    local fork_cmd
+    fork_cmd="$(python3 - "$PWD" "$original_session_id" <<'PY'
+import shlex
+import sys
+
+cwd, session_id = sys.argv[1:3]
+print(f"cd {shlex.quote(cwd)} && codex fork {shlex.quote(session_id)}")
+PY
+)"
+    tmux send-keys -t "$session_name" "$fork_cmd" C-m
+    printf '%s\n' "$session_name"
+}
+
+_codex_exec_fork_stop_pty_launcher() {
+    if [[ $# -ne 1 ]]; then
+        echo "Usage: _codex_exec_fork_stop_pty_launcher <launcher_session_name>" >&2
+        return 2
+    fi
+
+    local launcher_session_name="$1"
+    tmux kill-session -t "$launcher_session_name" 2>/dev/null || true
+}
+
+_codex_exec_fork_capture_pty_output() {
+    if [[ $# -ne 1 ]]; then
+        echo "Usage: _codex_exec_fork_capture_pty_output <launcher_session_name>" >&2
+        return 2
+    fi
+
+    local launcher_session_name="$1"
+    tmux capture-pane -pt "$launcher_session_name" -S -200 2>/dev/null || true
+}
+
+_codex_exec_fork_pty_has_returned_to_shell() {
+    if [[ $# -ne 1 ]]; then
+        echo "Usage: _codex_exec_fork_pty_has_returned_to_shell <launcher_session_name>" >&2
+        return 2
+    fi
+
+    local launcher_session_name="$1"
+    local current_cmd
+    current_cmd="$(tmux display-message -p -t "$launcher_session_name" '#{pane_current_command}' 2>/dev/null || true)"
+
+    case "$current_cmd" in
+        bash|zsh|sh|dash|ksh|fish|tcsh|csh|nu)
+            return 0 ;;
+        *)
+            return 1 ;;
+    esac
+}
+
+# Description: Mimic the missing non-interactive `codex exec fork` flow by
+# creating the fork via an interactive PTY first, then resuming it with
+# `codex exec resume --json`.
+# Usage: codex_exec_fork <session_id> [prompt]
+codex_exec_fork() {
+    if [[ "${1-}" == "-h" || "${1-}" == "--help" || $# -lt 1 || $# -gt 2 ]]; then
+        echo "Usage: codex_exec_fork <session_id> [prompt]" >&2
+        echo "Fork a Codex session through a PTY, then continue via \`codex exec resume --json\`." >&2
+        [[ $# -ge 1 && $# -le 2 ]] || return 2
+    fi
+
+    local original_session_id="$1"
+    local prompt="${2-}"
+    local sessions_dir="${CODEX_HOME:-$HOME/.codex}/sessions"
+    local timeout_seconds="${CODEX_EXEC_FORK_TIMEOUT_SECONDS:-15}"
+
+    if ! [[ "$timeout_seconds" =~ ^[0-9]+$ ]] || [[ "$timeout_seconds" -le 0 ]]; then
+        echo "CODEX_EXEC_FORK_TIMEOUT_SECONDS must be a positive integer, got: $timeout_seconds" >&2
+        return 2
+    fi
+
+    if ! command -v codex >/dev/null 2>&1; then
+        echo "\`codex\` command not found in PATH." >&2
+        return 1
+    fi
+
+    if ! [[ -d "$sessions_dir" ]]; then
+        echo "Codex sessions directory not found: $sessions_dir" >&2
+        return 1
+    fi
+
+    local marker_file
+    marker_file="$(mktemp)"
+    local find_output_file
+    find_output_file="$(mktemp)"
+    local launcher_session_name
+    if ! launcher_session_name="$(_codex_exec_fork_launch_in_pty "$original_session_id")"; then
+        rm -f "$marker_file" "$find_output_file"
+        return 1
+    fi
+
+    local new_session_id=""
+    local find_status=1
+    local attempts=$((timeout_seconds * 10))
+    local saw_non_shell_command=0
+    while [[ "$attempts" -gt 0 ]]; do
+        _codex_exec_fork_find_new_session_id "$sessions_dir" "$original_session_id" "$marker_file" >"$find_output_file"
+        find_status=$?
+        if [[ "$find_status" -eq 0 ]]; then
+            new_session_id="$(<"$find_output_file")"
+            break
+        fi
+
+        if [[ "$find_status" -ne 1 ]]; then
+            _codex_exec_fork_capture_pty_output "$launcher_session_name" | tail -n 40 >&2
+            _codex_exec_fork_stop_pty_launcher "$launcher_session_name"
+            rm -f "$marker_file" "$find_output_file"
+            return "$find_status"
+        fi
+
+        if ! tmux has-session -t "$launcher_session_name" 2>/dev/null; then
+            _codex_exec_fork_find_new_session_id "$sessions_dir" "$original_session_id" "$marker_file" >"$find_output_file"
+            find_status=$?
+            if [[ "$find_status" -eq 0 ]]; then
+                new_session_id="$(<"$find_output_file")"
+                break
+            fi
+
+            rm -f "$marker_file" "$find_output_file"
+            echo "codex fork tmux session disappeared before creating a forked session for $original_session_id." >&2
+            return 1
+        fi
+
+        if _codex_exec_fork_pty_has_returned_to_shell "$launcher_session_name"; then
+            if [[ "$saw_non_shell_command" -ne 1 ]]; then
+                sleep 0.1
+                attempts=$((attempts - 1))
+                continue
+            fi
+
+            _codex_exec_fork_find_new_session_id "$sessions_dir" "$original_session_id" "$marker_file" >"$find_output_file"
+            find_status=$?
+            if [[ "$find_status" -eq 0 ]]; then
+                new_session_id="$(<"$find_output_file")"
+                break
+            fi
+
+            _codex_exec_fork_capture_pty_output "$launcher_session_name" | tail -n 40 >&2
+            _codex_exec_fork_stop_pty_launcher "$launcher_session_name"
+            rm -f "$marker_file" "$find_output_file"
+            echo "codex fork returned to the shell before creating a forked session for $original_session_id." >&2
+            return 1
+        fi
+
+        saw_non_shell_command=1
+
+        sleep 0.1
+        attempts=$((attempts - 1))
+    done
+
+    _codex_exec_fork_stop_pty_launcher "$launcher_session_name"
+    rm -f "$marker_file" "$find_output_file"
+
+    if [[ -z "$new_session_id" ]]; then
+        echo "Timed out waiting for a forked session rollout from $original_session_id." >&2
+        return 1
+    fi
+
+    local -a resume_cmd=(codex exec resume --skip-git-repo-check --json "$new_session_id")
+    if [[ $# -eq 2 ]]; then
+        resume_cmd+=("$prompt")
+    fi
+    "${resume_cmd[@]}"
+}
+
+_agent_memory_watch_session_name() {
+    printf '%s\n' "${AGENT_MEMORY_WATCH_SESSION:-agent-memory-mgrep}"
+}
+
+_agent_memory_root_dir() {
+    python3 - "${AGENT_MEMORY_ROOT:-$HOME/agent-mems/mems}" <<'PY'
+from pathlib import Path
+import sys
+
+print(Path(sys.argv[1]).expanduser().resolve())
+PY
+}
+
+_agent_memory_start_watch_session() {
+    if [[ $# -ne 2 ]]; then
+        echo "Usage: _agent_memory_start_watch_session <tmux-session> <root-dir>" >&2
+        return 2
+    fi
+
+    local session_name="$1"
+    local root_dir="$2"
+    local quoted_root
+    quoted_root="$(printf '%q' "$root_dir")"
+    local watch_cmd="cd $quoted_root && exec mgrep watch"
+
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        tmux send-keys -t "$session_name" C-c
+        tmux send-keys -t "$session_name" "$watch_cmd" C-m
+    else
+        tmux new-session -d -s "$session_name" "$watch_cmd"
+    fi
+}
+
+_agent_memory_ensure_watcher() {
+    local root_dir
+    root_dir="$(_agent_memory_root_dir)"
+    local session_name
+    session_name="$(_agent_memory_watch_session_name)"
+
+    mkdir -p "$root_dir" || {
+        echo "Failed to create agent memory root: $root_dir" >&2
+        return 1
+    }
+
+    if ! command -v tmux >/dev/null 2>&1; then
+        echo "\`tmux\` is required for agent-memory." >&2
+        return 1
+    fi
+    if ! command -v mgrep >/dev/null 2>&1; then
+        echo "\`mgrep\` is required for agent-memory." >&2
+        return 1
+    fi
+
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        local current_cmd current_path pane_start_command
+        current_cmd="$(tmux display-message -p -t "$session_name" '#{pane_current_command}' 2>/dev/null || true)"
+        current_path="$(tmux display-message -p -t "$session_name" '#{pane_current_path}' 2>/dev/null || true)"
+        pane_start_command="$(tmux display-message -p -t "$session_name" '#{pane_start_command}' 2>/dev/null || true)"
+        if [[ "$current_path" == "$root_dir" ]] && { [[ "$current_cmd" == "mgrep" ]] || [[ "$pane_start_command" == *"mgrep watch"* ]]; }; then
+            return 0
+        fi
+    fi
+
+    _agent_memory_start_watch_session "$session_name" "$root_dir" || return 1
+    sleep 1
+
+    local started_cmd started_path started_start_command
+    started_cmd="$(tmux display-message -p -t "$session_name" '#{pane_current_command}' 2>/dev/null || true)"
+    started_path="$(tmux display-message -p -t "$session_name" '#{pane_current_path}' 2>/dev/null || true)"
+    started_start_command="$(tmux display-message -p -t "$session_name" '#{pane_start_command}' 2>/dev/null || true)"
+    if [[ "$started_path" == "$root_dir" ]] && { [[ "$started_cmd" == "mgrep" ]] || [[ "$started_start_command" == *"mgrep watch"* ]]; }; then
+        return 0
+    fi
+
+    echo "agent-memory watcher session '$session_name' failed to start mgrep watch in $root_dir" >&2
+    tmux capture-pane -pt "$session_name" -S -40 >&2 || true
+    return 1
+}
+
+agent-memory() {
+    if [[ "${1-}" == "-h" || "${1-}" == "--help" ]]; then
+        python3 "$SCRIPT_DIR/agent_memory.py" --help
+        return $?
+    fi
+
+    _agent_memory_ensure_watcher || return 1
+    AGENT_MEMORY_ROOT="$(_agent_memory_root_dir)" \
+    CODEX_THREAD_ID="${CODEX_THREAD_ID-}" \
+    python3 "$SCRIPT_DIR/agent_memory.py" "$@"
 }
